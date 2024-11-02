@@ -4,6 +4,7 @@
 use crate::runtime::vm::sys::mmap;
 use crate::{prelude::*, vm::usize_is_multiple_of_host_page_size};
 use core::ops::Range;
+use std::os::fd::AsFd;
 #[cfg(feature = "std")]
 use std::{fs::File, path::Path, sync::Arc};
 
@@ -69,7 +70,7 @@ impl Mmap {
                 file: None,
             })
         } else {
-            let mut result = Mmap {
+            let result = Mmap {
                 sys: mmap::Mmap::reserve(mapping_size)
                     .context(format!("mmap failed to reserve {mapping_size:#x} bytes"))?,
                 #[cfg(feature = "std")]
@@ -92,7 +93,7 @@ impl Mmap {
     ///
     /// This function will panic if `start` or `len` is not page aligned or if
     /// either are outside the bounds of this mapping.
-    pub fn make_accessible(&mut self, start: usize, len: usize) -> Result<()> {
+    pub fn make_accessible(&self, start: usize, len: usize) -> Result<()> {
         let page_size = crate::runtime::vm::host_page_size();
         assert_eq!(start & (page_size - 1), 0);
         assert_eq!(len & (page_size - 1), 0);
@@ -202,6 +203,45 @@ impl Mmap {
         self.sys
             .make_readonly(range)
             .context("failed to make memory readonly")
+    }
+
+    /// Makes the specified `range` within this `Mmap` to have no permissions.
+    pub unsafe fn make_inaccessible(&self, range: Range<usize>) -> Result<()> {
+        assert!(range.start <= self.len());
+        assert!(range.end <= self.len());
+        assert!(range.start <= range.end);
+        assert!(
+            range.start % crate::runtime::vm::host_page_size() == 0,
+            "changing of protections isn't page-aligned",
+        );
+        self.sys
+            .make_inaccessible(range)
+            .context("failed to make memory unaccessible")
+    }
+
+    pub unsafe fn decommit(&self, range: Range<usize>) -> Result<()> {
+        assert!(range.start <= self.len());
+        assert!(range.end <= self.len());
+        assert!(range.start <= range.end);
+        assert!(
+            range.start % crate::runtime::vm::host_page_size() == 0,
+            "decommit range isn't page-aligned",
+        );
+        self.sys
+            .decommit(range)
+            .context("failed to decommit memory")
+    }
+
+    pub unsafe fn map_fd<Fd: AsFd>(
+        &self,
+        start: usize,
+        fd: &Fd,
+        len: usize,
+        offset: u64,
+    ) -> Result<()> {
+        self.sys
+            .map_fd(start, fd, len, offset)
+            .context("failed to map file descriptor")
     }
 
     /// Returns the underlying file that this mmap is mapping, if present.

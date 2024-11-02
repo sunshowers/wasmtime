@@ -617,9 +617,13 @@ unsafe impl InstanceAllocatorImpl for PoolingInstanceAllocator {
         let mut image = memory.unwrap_static_image();
         let mut queue = DecommitQueue::default();
         image
-            .clear_and_remain_ready(self.memories.keep_resident, |ptr, len| {
-                queue.push_raw(ptr, len);
-            })
+            .clear_and_remain_ready(
+                self.memories.mapping(),
+                self.memories.keep_resident,
+                |ptr, len| {
+                    queue.push_raw(ptr, len);
+                },
+            )
             .expect("failed to reset memory image");
         queue.push_memory(allocation_index, image);
         self.merge_or_flush(queue);

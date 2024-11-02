@@ -203,9 +203,12 @@ impl Instance {
         module: &Module,
         imports: Imports<'_>,
     ) -> Result<Instance> {
-        let (instance, start) = Instance::new_raw(store.0, module, imports)?;
+        let (instance, start) =
+            Instance::new_raw(store.0, module, imports).context("Instance::new_raw failed")?;
         if let Some(start) = start {
-            instance.start_raw(store, start)?;
+            instance
+                .start_raw(store, start)
+                .context("Instance::start_raw failed")?;
         }
         Ok(instance)
     }
@@ -259,7 +262,9 @@ impl Instance {
 
         // Allocate the GC heap, if necessary.
         if store.engine().features().gc_types() {
-            let _ = store.gc_store_mut()?;
+            let _ = store
+                .gc_store_mut()
+                .context("StoreOpaque::gc_store_mut failed")?;
         }
 
         let compiled_module = module.compiled_module();
@@ -280,19 +285,19 @@ impl Instance {
         // it's the same later when we do actually insert it.
         let instance_to_be = store.store_data().next_id::<InstanceData>();
 
-        let mut instance_handle =
-            store
-                .engine()
-                .allocator()
-                .allocate_module(InstanceAllocationRequest {
-                    runtime_info: &ModuleRuntimeInfo::Module(module.clone()),
-                    imports,
-                    host_state: Box::new(Instance(instance_to_be)),
-                    store: StorePtr::new(store.traitobj()),
-                    wmemcheck: store.engine().config().wmemcheck,
-                    pkey: store.get_pkey(),
-                    tunables: store.engine().tunables(),
-                })?;
+        let mut instance_handle = store
+            .engine()
+            .allocator()
+            .allocate_module(InstanceAllocationRequest {
+                runtime_info: &ModuleRuntimeInfo::Module(module.clone()),
+                imports,
+                host_state: Box::new(Instance(instance_to_be)),
+                store: StorePtr::new(store.traitobj()),
+                wmemcheck: store.engine().config().wmemcheck,
+                pkey: store.get_pkey(),
+                tunables: store.engine().tunables(),
+            })
+            .context("InstanceAllocator::allocate_module failed")?;
 
         // The instance still has lots of setup, for example
         // data/elements/start/etc. This can all fail, but even on failure

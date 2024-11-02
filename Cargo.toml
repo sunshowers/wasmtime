@@ -308,6 +308,7 @@ similar = "2.1.0"
 toml = "0.8.10"
 mach2 = "0.4.2"
 memfd = "0.6.2"
+nodit = "0.9.2"
 psm = "0.1.11"
 proptest = "1.0.0"
 rand = { version = "0.8.3", features = ["small_rng"] }

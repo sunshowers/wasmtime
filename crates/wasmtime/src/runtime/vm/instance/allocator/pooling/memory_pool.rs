@@ -60,7 +60,6 @@ use crate::runtime::vm::{
     MpkEnabled, PoolingInstanceAllocatorConfig,
 };
 use crate::{prelude::*, vm::round_usize_up_to_host_pages};
-use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use wasmtime_environ::{DefinedMemoryIndex, MemoryStyle, Module, Tunables};
@@ -245,6 +244,10 @@ impl MemoryPool {
         Ok(pool)
     }
 
+    pub fn mapping(&self) -> &Mmap {
+        &self.mapping
+    }
+
     /// Return a protection key that stores can use for requesting new
     pub fn next_available_pkey(&self) -> Option<ProtectionKey> {
         let index = self.next_available_pkey.fetch_add(1, Ordering::SeqCst) % self.stripes.len();
@@ -340,7 +343,6 @@ impl MemoryPool {
                 MemoryStyle::Dynamic { .. } => {}
             }
 
-            let base_ptr = self.get_base(allocation_index);
             let base_capacity = self.layout.max_memory_bytes;
 
             let mut slot = self.take_memory_image_slot(allocation_index);
@@ -363,11 +365,12 @@ impl MemoryPool {
             // mmap that would leave an open space for someone
             // else to come in and map something.
             let initial_size = usize::try_from(initial_size).unwrap();
-            slot.instantiate(initial_size, image, ty, tunables)?;
+            slot.instantiate(&self.mapping, initial_size, image, ty, tunables)?;
 
             Memory::new_static(
                 ty,
-                base_ptr,
+                &self.mapping,
+                self.get_base_offset(allocation_index),
                 base_capacity,
                 slot,
                 self.layout.bytes_to_next_stripe_slot(),
@@ -444,7 +447,7 @@ impl MemoryPool {
                     // paved over with an anonymous mapping.
                     let index = MemoryAllocationIndex(id.0);
                     let mut slot = self.take_memory_image_slot(index);
-                    if slot.remove_image().is_ok() {
+                    if slot.remove_image(&self.mapping).is_ok() {
                         self.return_memory_image_slot(index, slot);
                     }
 
@@ -454,11 +457,9 @@ impl MemoryPool {
         }
     }
 
-    fn get_base(&self, allocation_index: MemoryAllocationIndex) -> *mut u8 {
+    fn get_base_offset(&self, allocation_index: MemoryAllocationIndex) -> usize {
         assert!(allocation_index.index() < self.layout.num_slots);
-        let offset =
-            self.layout.pre_slab_guard_bytes + allocation_index.index() * self.layout.slot_bytes;
-        unsafe { self.mapping.as_ptr().offset(offset as isize).cast_mut() }
+        self.layout.pre_slab_guard_bytes + allocation_index.index() * self.layout.slot_bytes
     }
 
     /// Take ownership of the given image slot. Must be returned via
@@ -471,7 +472,7 @@ impl MemoryPool {
 
         maybe_slot.unwrap_or_else(|| {
             MemoryImageSlot::create(
-                self.get_base(allocation_index) as *mut c_void,
+                self.get_base_offset(allocation_index),
                 0,
                 self.layout.max_memory_bytes,
             )
