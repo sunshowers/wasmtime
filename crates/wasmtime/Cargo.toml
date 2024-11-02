@@ -92,6 +92,7 @@ mach2 = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, optional = true }
+nodit = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "s390x")'.dependencies]
 psm = { workspace = true, optional = true }
@@ -238,6 +239,7 @@ runtime = [
   "dep:windows-sys",
   "dep:psm",
   "dep:rustix",
+  "dep:nodit",
   "rustix/mm",
   "pulley-interpreter?/interp",
 ]

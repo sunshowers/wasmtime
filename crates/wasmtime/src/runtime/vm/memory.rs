@@ -11,7 +11,6 @@ use crate::runtime::vm::{
 };
 use alloc::sync::Arc;
 use core::ops::Range;
-use core::ptr::NonNull;
 use core::time::Duration;
 use wasmtime_environ::{MemoryStyle, Trap, Tunables};
 
@@ -269,7 +268,7 @@ impl MmapMemory {
             .ok_or_else(|| format_err!("cannot allocate {} with guard regions", minimum))?;
         assert!(usize_is_multiple_of_host_page_size(request_bytes));
 
-        let mut mmap = Mmap::accessible_reserved(0, request_bytes)?;
+        let mmap = Mmap::accessible_reserved(0, request_bytes)?;
 
         if minimum > 0 {
             let accessible = round_usize_up_to_host_pages(minimum)?;
@@ -280,13 +279,12 @@ impl MmapMemory {
         // top of our mmap.
         let memory_image = match memory_image {
             Some(image) => {
-                let base = unsafe { mmap.as_mut_ptr().add(pre_guard_bytes) };
                 let mut slot = MemoryImageSlot::create(
-                    base.cast(),
+                    pre_guard_bytes,
                     minimum,
                     alloc_bytes + extra_to_reserve_on_growth,
                 );
-                slot.instantiate(minimum, Some(image), ty, tunables)?;
+                slot.instantiate(&mmap, minimum, Some(image), ty, tunables)?;
                 // On drop, we will unmap our mmap'd range that this slot was
                 // mapped on top of, so there is no need for the slot to wipe
                 // it with an anonymous mapping first.
@@ -375,7 +373,7 @@ impl RuntimeLinearMemory for MmapMemory {
         } else if let Some(image) = self.memory_image.as_mut() {
             // MemoryImageSlot has its own growth mechanisms; defer to its
             // implementation.
-            image.set_heap_limit(new_size)?;
+            image.set_heap_limit(&self.mmap, new_size)?;
         } else {
             // If the new size of this heap fits within the existing allocation
             // then all we need to do is to make the new pages accessible. This
@@ -436,9 +434,11 @@ impl RuntimeLinearMemory for MmapMemory {
 /// A "static" memory where the lifetime of the backing memory is managed
 /// elsewhere. Currently used with the pooling allocator.
 struct StaticMemory {
-    /// The base pointer of this static memory, wrapped up in a send/sync
-    /// wrapper.
-    base: SendSyncPtr<u8>,
+    // XXX THIS IS EXTREMELY DANGEROUS
+    mapping: SendSyncPtr<Mmap>,
+
+    /// The offset into the memory pool.
+    offset: usize,
 
     /// The byte capacity of the `base` pointer.
     capacity: usize,
@@ -460,7 +460,8 @@ struct StaticMemory {
 
 impl StaticMemory {
     fn new(
-        base_ptr: *mut u8,
+        mapping: &Mmap,
+        offset: usize,
         base_capacity: usize,
         initial_size: usize,
         maximum_size: Option<usize>,
@@ -484,13 +485,20 @@ impl StaticMemory {
         };
 
         Ok(Self {
-            base: SendSyncPtr::new(NonNull::new(base_ptr).unwrap()),
+            mapping: SendSyncPtr::new(
+                std::ptr::NonNull::new(mapping as *const Mmap as *mut Mmap).unwrap(),
+            ),
+            offset,
             capacity: base_capacity,
             size: initial_size,
             page_size_log2,
             memory_image,
             memory_and_guard_size,
         })
+    }
+
+    fn base_ptr(&self) -> *mut u8 {
+        unsafe { self.mapping.as_ref().as_ptr().add(self.offset) as *mut u8 }
     }
 }
 
@@ -507,12 +515,13 @@ impl RuntimeLinearMemory for StaticMemory {
         Some(self.capacity)
     }
 
-    fn grow_to(&mut self, new_byte_size: usize) -> Result<()> {
+    fn grow_to<'a>(&'a mut self, new_byte_size: usize) -> Result<()> {
+        let mapping = unsafe { self.mapping.as_ref() };
         // Never exceed the static memory size; this check should have been made
         // prior to arriving here.
         assert!(new_byte_size <= self.capacity);
 
-        self.memory_image.set_heap_limit(new_byte_size)?;
+        self.memory_image.set_heap_limit(mapping, new_byte_size)?;
 
         // Update our accounting of the available size.
         self.size = new_byte_size;
@@ -521,7 +530,7 @@ impl RuntimeLinearMemory for StaticMemory {
 
     fn vmmemory(&mut self) -> VMMemoryDefinition {
         VMMemoryDefinition {
-            base: self.base.as_ptr(),
+            base: self.base_ptr(),
             current_length: self.size.into(),
         }
     }
@@ -535,7 +544,7 @@ impl RuntimeLinearMemory for StaticMemory {
     }
 
     fn wasm_accessible(&self) -> Range<usize> {
-        let base = self.base.as_ptr() as usize;
+        let base = self.base_ptr() as usize;
         let end = base + self.memory_and_guard_size;
         base..end
     }
@@ -566,7 +575,8 @@ impl Memory {
     /// Create a new static (immovable) memory instance for the specified plan.
     pub fn new_static(
         ty: &wasmtime_environ::Memory,
-        base_ptr: *mut u8,
+        mapping: &Mmap,
+        offset: usize,
         base_capacity: usize,
         memory_image: MemoryImageSlot,
         memory_and_guard_size: usize,
@@ -574,7 +584,8 @@ impl Memory {
     ) -> Result<Self> {
         let (minimum, maximum) = Self::limit_new(ty, Some(store))?;
         let pooled_memory = StaticMemory::new(
-            base_ptr,
+            mapping,
+            offset,
             base_capacity,
             minimum,
             maximum,

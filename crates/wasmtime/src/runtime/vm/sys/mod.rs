@@ -47,10 +47,7 @@ fn empty_mmap() -> SendSyncPtr<[u8]> {
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(miri)] {
-        mod miri;
-        pub use miri::*;
-    } else if #[cfg(windows)] {
+    if #[cfg(windows)] {
         mod windows;
         pub use windows::*;
     } else if #[cfg(unix)] {
