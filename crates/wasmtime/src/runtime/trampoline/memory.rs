@@ -8,6 +8,7 @@ use crate::runtime::vm::{
     Table, TableAllocationIndex, VMMemoryDefinition,
 };
 use crate::store::{InstanceId, StoreOpaque};
+use crate::vm::Mmap;
 use crate::MemoryType;
 use alloc::sync::Arc;
 use core::ops::Range;
@@ -92,11 +93,11 @@ impl RuntimeLinearMemory for LinearMemoryProxy {
         self.mem.maximum_byte_size()
     }
 
-    fn grow_to(&mut self, new_size: usize) -> Result<()> {
+    fn grow_to(&mut self, mapping: &Mmap, new_size: usize) -> Result<()> {
         self.mem.grow_to(new_size)
     }
 
-    fn vmmemory(&mut self) -> VMMemoryDefinition {
+    fn vmmemory(&mut self, mapping: &Mmap) -> VMMemoryDefinition {
         VMMemoryDefinition {
             base: self.mem.as_ptr(),
             current_length: self.mem.byte_size().into(),

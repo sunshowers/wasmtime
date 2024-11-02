@@ -38,6 +38,8 @@ mod allocator;
 
 pub use allocator::*;
 
+use super::Mmap;
+
 /// A type that roughly corresponds to a WebAssembly instance, but is also used
 /// for host-defined objects.
 ///
@@ -645,16 +647,17 @@ impl Instance {
     /// successful.
     pub(crate) fn memory_grow(
         &mut self,
+        mapping: &Mmap,
         index: MemoryIndex,
         delta: u64,
     ) -> Result<Option<usize>, Error> {
         match self.env_module().defined_memory_index(index) {
-            Some(idx) => self.defined_memory_grow(idx, delta),
+            Some(idx) => self.defined_memory_grow(mapping, idx, delta),
             None => {
                 let import = self.imported_memory(index);
                 unsafe {
                     Instance::from_vmctx(import.vmctx, |i| {
-                        i.defined_memory_grow(import.index, delta)
+                        i.defined_memory_grow(mapping, import.index, delta)
                     })
                 }
             }
@@ -663,13 +666,14 @@ impl Instance {
 
     fn defined_memory_grow(
         &mut self,
+        mapping: &Mmap,
         idx: DefinedMemoryIndex,
         delta: u64,
     ) -> Result<Option<usize>, Error> {
         let store = unsafe { &mut *self.store() };
         let memory = &mut self.memories[idx].1;
 
-        let result = unsafe { memory.grow(delta, Some(store)) };
+        let result = unsafe { memory.grow(mapping, delta, Some(store)) };
 
         // Update the state used by a non-shared Wasm memory in case the base
         // pointer and/or the length changed.

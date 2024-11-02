@@ -82,6 +82,15 @@ pub trait RuntimeLinearMemory: Send + Sync {
     /// The `store` is used only for error reporting.
     fn grow(
         &mut self,
+        // XXX: This is challenging -- we need to decide whether to pass in the mapping here, or to
+        // store a reference to the mapping within the memory object.
+        //
+        // If we do the former, then we may need to support `Option<&Mmap>` or similar, because some
+        // components want to pass in the mmap and others don't.
+        //
+        // If we do the latter, then it's either lifetimes (which likely implies self-referential
+        // structs) or `Arc`. Neither seem that great.
+        mapping: &Mmap,
         delta_pages: u64,
         mut store: Option<&mut dyn VMStore>,
     ) -> Result<Option<(usize, usize)>, Error> {
@@ -130,7 +139,7 @@ pub trait RuntimeLinearMemory: Send + Sync {
             }
         }
 
-        match self.grow_to(new_byte_size) {
+        match self.grow_to(mapping, new_byte_size) {
             Ok(_) => Ok(Some((old_byte_size, new_byte_size))),
             Err(e) => {
                 // FIXME: shared memories may not have an associated store to
@@ -149,11 +158,11 @@ pub trait RuntimeLinearMemory: Send + Sync {
     ///
     /// Returns an error if memory can't be grown by the specified amount
     /// of bytes.
-    fn grow_to(&mut self, size: usize) -> Result<()>;
+    fn grow_to(&mut self, mapping: &Mmap, size: usize) -> Result<()>;
 
     /// Return a `VMMemoryDefinition` for exposing the memory to compiled wasm
     /// code.
-    fn vmmemory(&mut self) -> VMMemoryDefinition;
+    fn vmmemory(&mut self, mapping: &Mmap) -> VMMemoryDefinition;
 
     /// Does this memory need initialization? It may not if it already
     /// has initial contents courtesy of the `MemoryImage` passed to
@@ -280,13 +289,12 @@ impl MmapMemory {
         // top of our mmap.
         let memory_image = match memory_image {
             Some(image) => {
-                let base = unsafe { mmap.as_mut_ptr().add(pre_guard_bytes) };
                 let mut slot = MemoryImageSlot::create(
-                    base.cast(),
+                    pre_guard_bytes,
                     minimum,
                     alloc_bytes + extra_to_reserve_on_growth,
                 );
-                slot.instantiate(minimum, Some(image), ty, tunables)?;
+                slot.instantiate(&mmap, minimum, Some(image), ty, tunables)?;
                 // On drop, we will unmap our mmap'd range that this slot was
                 // mapped on top of, so there is no need for the slot to wipe
                 // it with an anonymous mapping first.
@@ -332,7 +340,7 @@ impl RuntimeLinearMemory for MmapMemory {
         self.maximum
     }
 
-    fn grow_to(&mut self, new_size: usize) -> Result<()> {
+    fn grow_to(&mut self, _mapping: Mmap, new_size: usize) -> Result<()> {
         assert!(usize_is_multiple_of_host_page_size(self.offset_guard_size));
         assert!(usize_is_multiple_of_host_page_size(self.pre_guard_size));
         assert!(usize_is_multiple_of_host_page_size(self.mmap.len()));
@@ -375,7 +383,7 @@ impl RuntimeLinearMemory for MmapMemory {
         } else if let Some(image) = self.memory_image.as_mut() {
             // MemoryImageSlot has its own growth mechanisms; defer to its
             // implementation.
-            image.set_heap_limit(new_size)?;
+            image.set_heap_limit(&self.mmap, new_size)?;
         } else {
             // If the new size of this heap fits within the existing allocation
             // then all we need to do is to make the new pages accessible. This
@@ -409,7 +417,7 @@ impl RuntimeLinearMemory for MmapMemory {
         Ok(())
     }
 
-    fn vmmemory(&mut self) -> VMMemoryDefinition {
+    fn vmmemory(&mut self, _mapping: &Mmap) -> VMMemoryDefinition {
         VMMemoryDefinition {
             base: unsafe { self.mmap.as_mut_ptr().add(self.pre_guard_size) },
             current_length: self.len.into(),
@@ -436,9 +444,8 @@ impl RuntimeLinearMemory for MmapMemory {
 /// A "static" memory where the lifetime of the backing memory is managed
 /// elsewhere. Currently used with the pooling allocator.
 struct StaticMemory {
-    /// The base pointer of this static memory, wrapped up in a send/sync
-    /// wrapper.
-    base: SendSyncPtr<u8>,
+    /// The offset into the memory pool.
+    offset: usize,
 
     /// The byte capacity of the `base` pointer.
     capacity: usize,
@@ -460,7 +467,7 @@ struct StaticMemory {
 
 impl StaticMemory {
     fn new(
-        base_ptr: *mut u8,
+        offset: usize,
         base_capacity: usize,
         initial_size: usize,
         maximum_size: Option<usize>,
@@ -484,7 +491,7 @@ impl StaticMemory {
         };
 
         Ok(Self {
-            base: SendSyncPtr::new(NonNull::new(base_ptr).unwrap()),
+            offset,
             capacity: base_capacity,
             size: initial_size,
             page_size_log2,
@@ -507,19 +514,19 @@ impl RuntimeLinearMemory for StaticMemory {
         Some(self.capacity)
     }
 
-    fn grow_to(&mut self, new_byte_size: usize) -> Result<()> {
+    fn grow_to(&mut self, mmap: &Mmap, new_byte_size: usize) -> Result<()> {
         // Never exceed the static memory size; this check should have been made
         // prior to arriving here.
         assert!(new_byte_size <= self.capacity);
 
-        self.memory_image.set_heap_limit(new_byte_size)?;
+        self.memory_image.set_heap_limit(mmap, new_byte_size)?;
 
         // Update our accounting of the available size.
         self.size = new_byte_size;
         Ok(())
     }
 
-    fn vmmemory(&mut self) -> VMMemoryDefinition {
+    fn vmmemory(&mut self, mmap: &Mmap) -> VMMemoryDefinition {
         VMMemoryDefinition {
             base: self.base.as_ptr(),
             current_length: self.size.into(),
@@ -566,7 +573,7 @@ impl Memory {
     /// Create a new static (immovable) memory instance for the specified plan.
     pub fn new_static(
         ty: &wasmtime_environ::Memory,
-        base_ptr: *mut u8,
+        offset: usize,
         base_capacity: usize,
         memory_image: MemoryImageSlot,
         memory_and_guard_size: usize,
@@ -574,7 +581,7 @@ impl Memory {
     ) -> Result<Self> {
         let (minimum, maximum) = Self::limit_new(ty, Some(store))?;
         let pooled_memory = StaticMemory::new(
-            base_ptr,
+            offset,
             base_capacity,
             minimum,
             maximum,
@@ -714,17 +721,18 @@ impl Memory {
     /// which lives inside it.
     pub unsafe fn grow(
         &mut self,
+        mapping: &Mmap,
         delta_pages: u64,
         store: Option<&mut dyn VMStore>,
     ) -> Result<Option<usize>, Error> {
         self.0
-            .grow(delta_pages, store)
+            .grow(mapping, delta_pages, store)
             .map(|opt| opt.map(|(old, _new)| old))
     }
 
     /// Return a `VMMemoryDefinition` for exposing the memory to compiled wasm code.
-    pub fn vmmemory(&mut self) -> VMMemoryDefinition {
-        self.0.vmmemory()
+    pub fn vmmemory(&mut self, mapping: &Mmap) -> VMMemoryDefinition {
+        self.0.vmmemory(mapping)
     }
 
     /// Consume the memory, returning its [`MemoryImageSlot`] if any is present.
@@ -748,11 +756,11 @@ impl Memory {
     }
 
     /// Implementation of `memory.atomic.notify` for all memories.
-    pub fn atomic_notify(&mut self, addr: u64, count: u32) -> Result<u32, Trap> {
+    pub fn atomic_notify(&mut self, mapping: &Mmap, addr: u64, count: u32) -> Result<u32, Trap> {
         match self.0.as_any_mut().downcast_mut::<SharedMemory>() {
             Some(m) => m.atomic_notify(addr, count),
             None => {
-                validate_atomic_addr(&self.vmmemory(), addr, 4, 4)?;
+                validate_atomic_addr(&self.vmmemory(mapping), addr, 4, 4)?;
                 Ok(0)
             }
         }
@@ -761,6 +769,7 @@ impl Memory {
     /// Implementation of `memory.atomic.wait32` for all memories.
     pub fn atomic_wait32(
         &mut self,
+        mapping: &Mmap,
         addr: u64,
         expected: u32,
         timeout: Option<Duration>,
@@ -768,7 +777,7 @@ impl Memory {
         match self.0.as_any_mut().downcast_mut::<SharedMemory>() {
             Some(m) => m.atomic_wait32(addr, expected, timeout),
             None => {
-                validate_atomic_addr(&self.vmmemory(), addr, 4, 4)?;
+                validate_atomic_addr(&self.vmmemory(mapping), addr, 4, 4)?;
                 Err(Trap::AtomicWaitNonSharedMemory)
             }
         }
@@ -777,6 +786,7 @@ impl Memory {
     /// Implementation of `memory.atomic.wait64` for all memories.
     pub fn atomic_wait64(
         &mut self,
+        mapping: &Mmap,
         addr: u64,
         expected: u64,
         timeout: Option<Duration>,
@@ -784,7 +794,7 @@ impl Memory {
         match self.0.as_any_mut().downcast_mut::<SharedMemory>() {
             Some(m) => m.atomic_wait64(addr, expected, timeout),
             None => {
-                validate_atomic_addr(&self.vmmemory(), addr, 8, 8)?;
+                validate_atomic_addr(&self.vmmemory(mapping), addr, 8, 8)?;
                 Err(Trap::AtomicWaitNonSharedMemory)
             }
         }
