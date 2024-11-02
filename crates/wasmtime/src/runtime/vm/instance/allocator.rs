@@ -451,7 +451,10 @@ pub trait InstanceAllocator: InstanceAllocatorImpl {
                 .defined_memory_index(memory_index)
                 .expect("should be a defined memory since we skipped imported ones");
 
-            memories.push(self.allocate_memory(request, ty, request.tunables, memory_index)?);
+            memories.push(
+                self.allocate_memory(request, ty, request.tunables, memory_index)
+                    .context("allocate_memory failed")?,
+            );
         }
 
         Ok(())
