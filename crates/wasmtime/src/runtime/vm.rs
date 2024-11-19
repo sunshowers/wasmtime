@@ -21,6 +21,7 @@ use wasmtime_environ::{
 
 mod arch;
 mod async_yield;
+mod byte_count;
 #[cfg(feature = "component-model")]
 pub mod component;
 mod const_expr;
@@ -51,6 +52,7 @@ pub use wasmtime_jit_debug::gdb_jit_int::GdbJitImageRegistration;
 
 pub use crate::runtime::vm::arch::get_stack_pointer;
 pub use crate::runtime::vm::async_yield::*;
+pub use crate::runtime::vm::byte_count::*;
 pub use crate::runtime::vm::export::*;
 pub use crate::runtime::vm::gc::*;
 pub use crate::runtime::vm::imports::Imports;
@@ -366,6 +368,8 @@ pub fn host_page_size() -> usize {
 }
 
 /// Is `bytes` a multiple of the host page size?
+///
+/// (Deprecated: consider switching to `HostAlignedByteCount`.)
 #[cfg(feature = "signals-based-traps")]
 pub fn usize_is_multiple_of_host_page_size(bytes: usize) -> bool {
     bytes % host_page_size() == 0
@@ -374,6 +378,8 @@ pub fn usize_is_multiple_of_host_page_size(bytes: usize) -> bool {
 /// Round the given byte size up to a multiple of the host OS page size.
 ///
 /// Returns an error if rounding up overflows.
+///
+/// (Deprecated: consider switching to `HostAlignedByteCount`.)
 #[cfg(feature = "signals-based-traps")]
 pub fn round_u64_up_to_host_pages(bytes: u64) -> Result<u64> {
     let page_size = u64::try_from(crate::runtime::vm::host_page_size()).err2anyhow()?;
@@ -387,6 +393,8 @@ pub fn round_u64_up_to_host_pages(bytes: u64) -> Result<u64> {
 }
 
 /// Same as `round_u64_up_to_host_pages` but for `usize`s.
+///
+/// (Deprecated: consider switching to `HostAlignedByteCount`.)
 #[cfg(feature = "signals-based-traps")]
 pub fn round_usize_up_to_host_pages(bytes: usize) -> Result<usize> {
     let bytes = u64::try_from(bytes).err2anyhow()?;
